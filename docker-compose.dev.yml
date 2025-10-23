@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: szept-db
+    environment:
+      POSTGRES_USER: szeptuser
+      POSTGRES_PASSWORD: szeptpass
+      POSTGRES_DB: szeptdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: ./apps/backend/Dockerfile.dev
+    container_name: szept-backend
+    depends_on:
+      - postgres
+    env_file:
+      - ./apps/backend/.env
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./apps/backend:/app/apps/backend
+      - /app/apps/backend/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+
+  frontend:
+    build:
+      context: .
+      dockerfile: ./apps/frontend/Dockerfile.dev
+    container_name: szept-frontend
+    depends_on:
+      - backend
+    env_file:
+      - ./apps/frontend/.env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/frontend:/app/apps/frontend
+      - /app/apps/frontend/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+
+volumes:
+  pgdata:

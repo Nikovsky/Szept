@@ -1,0 +1,10 @@
+FROM node:20-alpine
+WORKDIR /app
+RUN npm i -g pnpm
+COPY package.json pnpm-workspace.yaml ./
+COPY apps/backend/package.json ./apps/backend/
+COPY packages ./packages
+RUN pnpm install --filter backend...
+WORKDIR /app/apps/backend
+EXPOSE 3001
+CMD ["pnpm", "start:dev"]
