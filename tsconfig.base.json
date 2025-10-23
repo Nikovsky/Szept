@@ -1,0 +1,16 @@
+// szept/tsconfig.base.json
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    "module": "commonjs",
+    "lib": ["ES2021"],
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "moduleResolution": "node",
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@szept/types": ["packages/types"]
+    }
+  }
+}

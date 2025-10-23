@@ -1,5 +1,5 @@
 {
-  "name": "chat-app",
+  "name": "szept-app",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -12,6 +12,7 @@
     "dev:docker": "docker compose -f docker-compose.dev.yml up"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
   }
 }

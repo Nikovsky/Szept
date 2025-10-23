@@ -29,6 +29,8 @@ readMessages MessageRead[]
 notifications Notification[]
 callsMade Call[] @relation("CallsMade")
 callsReceived Call[] @relation("CallsReceived")
+refreshSessions RefreshSession[]
+passwordResetTokens PasswordResetToken[]
 }
 
 // Czaty 1:1 lub grupowe
@@ -116,4 +118,38 @@ model Notification {
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id])
+}
+
+// Sesja odświeżania tokenów
+model RefreshSession {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rtHash String
+  familyId String @default(uuid())
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  replacedBy String?
+  ipHash String?
+  uaHash String?
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+}
+
+// Token resetu hasła
+model PasswordResetToken {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String
+  expiresAt DateTime
+  usedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  
 }
