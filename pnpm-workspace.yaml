@@ -4,8 +4,11 @@ packages:
 
 ignoredBuiltDependencies:
   - '@prisma/engines'
+  - sharp
+  - unrs-resolver
 
 onlyBuiltDependencies:
+  - '@nestjs/core'
   - '@prisma/client'
   - argon2
   - prisma

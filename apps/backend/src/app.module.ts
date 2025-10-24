@@ -7,6 +7,7 @@ import { HealthModule } from './modules/health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { PrismaService } from './prisma/prisma.service';
 import { jwtConfig } from './config/jwt.config';
+import { AuthModule } from './modules/auth/auth.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { jwtConfig } from './config/jwt.config';
     }),
     HealthModule,
     PrismaModule,
+    AuthModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService],

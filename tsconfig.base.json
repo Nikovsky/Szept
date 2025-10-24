@@ -4,13 +4,14 @@
     "target": "ES2021",
     "module": "commonjs",
     "lib": ["ES2021"],
-    "esModuleInterop": true,
-    "skipLibCheck": true,
     "moduleResolution": "node",
     "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
-      "@szept/types": ["packages/types"]
+      "@szept/types": ["packages/types/dist"],
+      "@szept/types/*": ["packages/types/dist/*"]
     }
   }
 }

@@ -12,45 +12,46 @@ datasource db {
 // ========== MODELE DANYCH ==========
 // Użytkownik systemu czatu
 model User {
-  id String @id @default(uuid())
-  email String @unique
-  password String
-  displayName String
-  status String @default("BUSSY") // Online | Busy | Offline
-  avatarUrl String?
-  lastSeen DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String    @id @default(uuid())
+  email       String    @unique
+  password    String
+  displayName String    @unique
+  status      String    @default("BUSSY") // Online | Busy | Offline
+  avatarUrl   String?
+  lastSeen    DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
-// relacje
-messages Message[] @relation("MessagesSent")
-chats UserOnChat[]
-readMessages MessageRead[]
-notifications Notification[]
-callsMade Call[] @relation("CallsMade")
-callsReceived Call[] @relation("CallsReceived")
-refreshSessions RefreshSession[]
-passwordResetTokens PasswordResetToken[]
+  // relacje
+  messages            Message[]            @relation("MessagesSent")
+  chats               UserOnChat[]
+  readMessages        MessageRead[]
+  notifications       Notification[]
+  callsMade           Call[]               @relation("CallsMade")
+  callsReceived       Call[]               @relation("CallsReceived")
+  refreshSessions     RefreshSession[]
+  passwordResetTokens PasswordResetToken[]
+  securityEvents      SecurityEvent[]
 }
 
 // Czaty 1:1 lub grupowe
 model Chat {
-  id String @id @default(uuid())
-  name String?
-  isGroup Boolean @default(false)
+  id        String   @id @default(uuid())
+  name      String?
+  isGroup   Boolean  @default(false)
   createdAt DateTime @default(now())
 
   // relacje
-  members UserOnChat[]
+  members  UserOnChat[]
   messages Message[]
-  calls Call[]
+  calls    Call[]
 }
 
 // Relacja wielu do wielu między użytkownikami a czatami
 model UserOnChat {
-  userId String
-  chatId String
-  role String @default("member") // member | admin
+  userId   String
+  chatId   String
+  role     String   @default("member") // member | admin
   joinedAt DateTime @default(now())
 
   // relacje
@@ -62,30 +63,30 @@ model UserOnChat {
 
 // Wiadomości (tekst, obraz, głosówka)
 model Message {
-  id String @id @default(uuid())
-  chatId String
-  senderId String
-  content String?
-  type String @default("text") // text | image | audio
-  fileUrl String?
-  status String @default("sent") // sent | delivered | read
-  createdAt DateTime @default(now())
-  editedAt DateTime?
+  id        String    @id @default(uuid())
+  chatId    String
+  senderId  String
+  content   String?
+  type      String    @default("text") // text | image | audio
+  fileUrl   String?
+  status    String    @default("sent") // sent | delivered | read
+  createdAt DateTime  @default(now())
+  editedAt  DateTime?
   deletedAt DateTime?
 
   // relacje
-  chat Chat @relation(fields: [chatId], references: [id])
-  sender User @relation("MessagesSent", fields: [senderId], references: [id])
+  chat   Chat          @relation(fields: [chatId], references: [id])
+  sender User          @relation("MessagesSent", fields: [senderId], references: [id])
   readBy MessageRead[]
 }
 
 // Kto i kiedy odczytał wiadomość
 model MessageRead {
-  userId String
+  userId    String
   messageId String
-  readAt DateTime @default(now())
+  readAt    DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
   message Message @relation(fields: [messageId], references: [id])
 
   @@id([userId, messageId])
@@ -93,28 +94,28 @@ model MessageRead {
 
 // Historia rozmów głosowych (WebRTC)
 model Call {
-  id String @id @default(uuid())
-  chatId String
-  callerId String
-  calleeId String
-  startedAt DateTime @default(now())
-  endedAt DateTime?
+  id        String    @id @default(uuid())
+  chatId    String
+  callerId  String
+  calleeId  String
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
 
   duration Int?
-  status String @default("completed") // completed | missed | ongoing
+  status   String @default("completed") // completed | missed | ongoing
 
-  chat Chat @relation(fields: [chatId], references: [id])
+  chat   Chat @relation(fields: [chatId], references: [id])
   caller User @relation("CallsMade", fields: [callerId], references: [id])
   callee User @relation("CallsReceived", fields: [calleeId], references: [id])
 }
 
 // Powiadomienia systemowe (np. zaproszenia)
 model Notification {
-  id String @id @default(uuid())
-  userId String
-  type String @default("system") // system | invtie
-  message String
-  read Boolean @default(false)
+  id        String   @id @default(uuid())
+  userId    String
+  type      String   @default("system") // system | invtie
+  message   String
+  read      Boolean  @default(false)
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id])
@@ -122,34 +123,50 @@ model Notification {
 
 // Sesja odświeżania tokenów
 model RefreshSession {
-  id String @id @default(uuid())
-  userId String
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  rtHash String
-  familyId String @default(uuid())
-  createdAt DateTime @default(now())
-  expiresAt DateTime
-  revokedAt DateTime?
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rtHash     String
+  familyId   String    @default(uuid())
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
   replacedBy String?
-  ipHash String?
-  uaHash String?
+  ipHash     String?
+  uaHash     String?
+  csrfHash   String?
 
   @@index([userId])
   @@index([familyId])
   @@index([expiresAt])
+  @@index([csrfHash])
 }
 
 // Token resetu hasła
 model PasswordResetToken {
-  id String @id @default(uuid())
-  userId String
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   tokenHash String
   expiresAt DateTime
-  usedAt DateTime?
-  createdAt DateTime @default(now())
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 
   @@index([userId])
   @@index([expiresAt])
-  
+}
+
+// Rejestr zdarzeń bezpieczeństwa (audit trail)
+model SecurityEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String // LOGIN | REFRESH | LOGOUT | REVOKE | REPLAY_DETECTED
+  ip        String? // skrócony IP lub hash
+  ua        String? // user-agent lub hash
+  details   String? // JSON string (dodatkowe dane)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
 }

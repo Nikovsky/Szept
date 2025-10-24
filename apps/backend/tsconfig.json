@@ -1,4 +1,5 @@
 // apps/backend/tsconfig.json
+
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
@@ -13,11 +14,14 @@
     "allowSyntheticDefaultImports": true,
     "target": "ES2021",
     "sourceMap": true,
+    "rootDir": ".",
     "outDir": "./dist",
     "baseUrl": "./",
     "paths": {
       "src/*": ["./src/*"],
-      "@szept/types": ["../../packages/types"]
+      "@/*": ["src/*"],
+      "@szept/types": ["../../packages/types/dist"],
+      "@szept/types/*": ["../../packages/types/dist/*"]
     },
     "incremental": true,
     "skipLibCheck": true,
@@ -27,5 +31,6 @@
     "strictBindCallApply": false,
     "noFallthroughCasesInSwitch": false
   },
-  "include": ["src", "generated"]
+  "include": ["src", "generated"],
+  "exclude": ["../../packages/types"]
 }
