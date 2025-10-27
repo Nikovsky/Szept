@@ -1,29 +1,51 @@
+// apps/backend/src/modules/auth/jwt/jwt.strategy.ts
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PrismaService } from '@/prisma/prisma.service';
-import { AccessPayload } from '@szept/types';
+import { AuthPayload } from '@szept/types';
+import { AuthConfigService } from '@/config/auth.config';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(private prisma: PrismaService) {
+  constructor(
+    private prisma: PrismaService,
+    private readonly cfg: AuthConfigService,
+  ) {
     super({
       jwtFromRequest: ExtractJwt.fromExtractors([
-        (req) => req?.cookies?.access_token || null,
+        (req) => req?.cookies?.access_token ?? null,
       ]),
       ignoreExpiration: false,
-      secretOrKey: process.env.JWT_ACCESS_SECRET ?? 'default_secret',
-      issuer: process.env.JWT_ISSUER,
-      audience: process.env.JWT_AUDIENCE,
+      secretOrKey: cfg.accessSecret,
+      issuer: cfg.issuer,
+      audience: cfg.audience,
     });
   }
 
-  async validate(payload: AccessPayload) {
+  async validate(payload: AuthPayload) {
     const session = await this.prisma.refreshSession.findUnique({
-      where: { id: payload.sid },
+      where: { id: payload.sessionId },
+      select: { revokedAt: true, expiresAt: true },
     });
-    if (!session || session.revokedAt || session.expiresAt <= new Date())
-      throw new UnauthorizedException('Session invalid');
-    return { userId: payload.sub, sessionId: payload.sid };
+
+    if (!session) {
+      throw new UnauthorizedException('Session not found');
+    }
+
+    if (session.revokedAt) {
+      throw new UnauthorizedException('Session revoked');
+    }
+
+    if (session.expiresAt.getTime() <= Date.now()) {
+      throw new UnauthorizedException('Session expired');
+    }
+
+    return {
+      userId: payload.sub,
+      sessionId: payload.sessionId,
+      familyId: payload.familyId,
+      roles: payload.role ?? ['user'],
+    };
   }
 }

@@ -9,18 +9,35 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum UserStatus {
+  ONLINE
+  BUSY
+  OFFLINE
+}
+
+enum SecurityEventType {
+  LOGIN
+  REFRESH
+  LOGOUT
+  REVOKE
+  REPLAY_DETECTED
+  SOCKET_CONNECT
+  SOCKET_DISCONNECT
+  MESSAGE_SEND
+}
+
 // ========== MODELE DANYCH ==========
 // Użytkownik systemu czatu
 model User {
-  id          String    @id @default(uuid())
-  email       String    @unique
+  id          String     @id @default(uuid())
+  email       String     @unique
   password    String
-  displayName String    @unique
-  status      String    @default("BUSSY") // Online | Busy | Offline
+  displayName String     @unique
+  status      UserStatus @default(OFFLINE)
   avatarUrl   String?
   lastSeen    DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 
   // relacje
   messages            Message[]            @relation("MessagesSent")
@@ -32,6 +49,7 @@ model User {
   refreshSessions     RefreshSession[]
   passwordResetTokens PasswordResetToken[]
   securityEvents      SecurityEvent[]
+  devices             Device[]
 }
 
 // Czaty 1:1 lub grupowe
@@ -61,23 +79,79 @@ model UserOnChat {
   @@id([userId, chatId])
 }
 
+// --- E2EE ---
+model Device {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  platform   String // web | ios | android | desktop
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  idKeyPub    Bytes
+  signKeyPub  Bytes
+  fingerprint String  @unique
+  isVerified  Boolean @default(false)
+
+  signedPreKeys  SignedPreKey[]
+  oneTimePreKeys OneTimePreKey[]
+  messages       Message[]       @relation("MessagesFromDevice")
+  Message        Message[]
+}
+
+model SignedPreKey {
+  id        String   @id @default(cuid())
+  deviceId  String
+  device    Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  keyId     Int
+  pub       Bytes
+  signature Bytes
+  createdAt DateTime @default(now())
+  isCurrent Boolean  @default(true)
+
+  @@unique([deviceId, keyId])
+}
+
+model OneTimePreKey {
+  id         String    @id @default(cuid())
+  deviceId   String
+  device     Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  keyId      Int
+  pub        Bytes
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([deviceId, keyId])
+  @@index([deviceId, consumedAt])
+}
+
 // Wiadomości (tekst, obraz, głosówka)
 model Message {
-  id        String    @id @default(uuid())
-  chatId    String
-  senderId  String
-  content   String?
-  type      String    @default("text") // text | image | audio
-  fileUrl   String?
-  status    String    @default("sent") // sent | delivered | read
-  createdAt DateTime  @default(now())
-  editedAt  DateTime?
-  deletedAt DateTime?
+  id             String        @id @default(uuid())
+  chatId         String
+  senderId       String
+  senderDeviceId String
+  encType        String
+  ciphertext     Bytes
+  nonce          Bytes
+  ad             Bytes?
+  ratchetCounter Int?
+  keyId          Int?
+  status         String        @default("sent")
+  createdAt      DateTime      @default(now())
+  deliveredAt    DateTime?
+  readReceipts   MessageRead[]
 
   // relacje
-  chat   Chat          @relation(fields: [chatId], references: [id])
-  sender User          @relation("MessagesSent", fields: [senderId], references: [id])
-  readBy MessageRead[]
+  chat         Chat    @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  sender       User    @relation("MessagesSent", fields: [senderId], references: [id])
+  senderDevice Device  @relation("MessagesFromDevice", fields: [senderDeviceId], references: [id])
+  Device       Device? @relation(fields: [deviceId], references: [id])
+  deviceId     String?
+
+  @@index([chatId, createdAt])
+  @@index([senderId, createdAt])
 }
 
 // Kto i kiedy odczytał wiadomość
@@ -123,23 +197,23 @@ model Notification {
 
 // Sesja odświeżania tokenów
 model RefreshSession {
-  id         String    @id @default(uuid())
-  userId     String
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  rtHash     String
-  familyId   String    @default(uuid())
-  createdAt  DateTime  @default(now())
-  expiresAt  DateTime
-  revokedAt  DateTime?
-  replacedBy String?
-  ipHash     String?
-  uaHash     String?
-  csrfHash   String?
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rtHash       String
+  familyId     String    @default(uuid())
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedBy   String?
+  ipHash       String?
+  uaHash       String?
+  lastUsedAt   DateTime?
+  refreshCount Int
 
-  @@index([userId])
+  @@index([userId, revokedAt, createdAt], map: "idx_refresh_active")
   @@index([familyId])
   @@index([expiresAt])
-  @@index([csrfHash])
 }
 
 // Token resetu hasła
@@ -167,6 +241,5 @@ model SecurityEvent {
   details   String? // JSON string (dodatkowe dane)
   createdAt DateTime @default(now())
 
-  @@index([userId])
-  @@index([createdAt])
+  @@index([userId, createdAt], map: "idx_securityevent_user_date")
 }

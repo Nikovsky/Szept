@@ -9,25 +9,28 @@ import { PrismaService } from '@/prisma/prisma.service';
 import * as argon2 from 'argon2';
 import { randomBytes, createHash, randomUUID, timingSafeEqual } from 'crypto';
 import { addSeconds } from 'date-fns';
-import { jwtConfig } from '@/config/jwt.config';
-import { AccessPayload, SecurityEvent, TokenBundle } from '@szept/types';
+import {
+  AuthPayload,
+  SecurityEvent,
+  SessionInfo,
+  TokenBundle,
+  SecurityEventType,
+} from '@szept/types';
 import { LoginUserDto, RegisterUserDto } from './dto/auth.dto';
 import { RefreshSession } from 'generated/prisma/client';
+import { AuthConfigService } from '@/config/auth.config';
+import { humanTime, parseUserAgent } from './utils/session-info.util';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 @Injectable()
 export class AuthService {
-  private readonly cfg = jwtConfig();
   private readonly logger = new Logger(AuthService.name);
-  private readonly ipSalt = process.env.IP_HASH_SALT ?? 'ip-salt';
-  private readonly uaSalt = process.env.UA_HASH_SALT ?? 'ua-salt';
-  private readonly csrfSalt = process.env.CSRF_HASH_SALT ?? 'csrf-salt';
-  private readonly MAX_SESSIONS = 3;
-  private readonly REUSE =
-    (process.env.ENABLE_SESSION_REUSE ?? 'false') === 'true';
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly eventEmitter: EventEmitter2,
     private readonly jwt: JwtService,
+    private readonly cfg: AuthConfigService,
   ) {}
 
   // --- UTILS ---
@@ -41,37 +44,61 @@ export class AuthService {
   private genOpaque() {
     return randomBytes(32).toString('base64url');
   }
-  private genCsrf() {
-    return randomBytes(16).toString('base64url');
-  }
-  private csrfHash(t: string) {
-    return this.sha256(t, this.csrfSalt);
-  }
 
-  private async signAccess(userId: string, sid: string) {
-    const payload: AccessPayload = { sub: userId, sid };
+  private async signAccess(
+    userId: string,
+    sessionId: string,
+    familyId: string,
+  ) {
+    const payload: AuthPayload = { sub: userId, sessionId, familyId };
     return this.jwt.signAsync(payload, {
-      secret: process.env.JWT_ACCESS_SECRET,
-      expiresIn: this.cfg.ACCESS_TTL,
-      issuer: this.cfg.ISSUER,
-      audience: this.cfg.AUDIENCE,
+      secret: this.cfg.accessSecret,
+      expiresIn: this.cfg.accessTtl,
+      issuer: this.cfg.issuer,
+      audience: this.cfg.audience,
     });
   }
 
-  private async logSecurity(event: SecurityEvent) {
+  private hashLogValue(value?: string | null): string | null {
+    if (!value) return null;
+    const globalSalt = this.cfg.ipSalt;
+    return createHash('sha256')
+      .update(globalSalt + '|' + value)
+      .digest('base64url');
+  }
+
+  private async logSecurity(event: SecurityEvent): Promise<void> {
     try {
       await this.prisma.securityEvent.create({
         data: {
-          type: event.type,
+          type: String(event.type),
           userId: event.userId,
-          ip: event.ip ?? null,
-          ua: event.ua ?? null,
+          ip: this.hashLogValue(event.ip),
+          ua: this.hashLogValue(event.ua),
           details: event.details ? JSON.stringify(event.details) : null,
         },
       });
     } catch (e: Error | any) {
       this.logger.warn(`Security log failed: ${e.message}`);
     }
+  }
+
+  async createSecurityEvent(data: {
+    userId: string;
+    type: string;
+    ip?: string;
+    ua?: string;
+    details?: string;
+  }) {
+    await this.prisma.securityEvent.create({
+      data: {
+        userId: data.userId,
+        type: data.type,
+        ip: this.hashLogValue(data.ip),
+        ua: this.hashLogValue(data.ua),
+        details: data.details,
+      },
+    });
   }
 
   // --- core logic ---
@@ -86,7 +113,7 @@ export class AuthService {
 
     if (!user) {
       await this.logSecurity({
-        type: 'LOGIN',
+        type: SecurityEventType.LOGIN,
         userId: 'unknown',
         ip,
         ua,
@@ -101,7 +128,7 @@ export class AuthService {
     const valid = await argon2.verify(user.password, dto.password);
     if (!valid) {
       await this.logSecurity({
-        type: 'LOGIN',
+        type: SecurityEventType.LOGIN,
         userId: user.id,
         ip,
         ua,
@@ -115,7 +142,7 @@ export class AuthService {
     const tokens = await this.issueSessionForUser(user.id, ip, ua);
 
     await this.logSecurity({
-      type: 'LOGIN',
+      type: SecurityEventType.LOGIN,
       userId: user.id,
       ip,
       ua,
@@ -148,9 +175,9 @@ export class AuthService {
 
     const passwordHash = await argon2.hash(dto.password, {
       type: argon2.argon2id,
-      memoryCost: 2 ** 16,
-      timeCost: 2,
-      parallelism: 1,
+      memoryCost: this.cfg.argonMemory,
+      timeCost: this.cfg.argonTime,
+      parallelism: this.cfg.argonParallelism,
     });
 
     const user = await this.prisma.user.create({
@@ -174,9 +201,14 @@ export class AuthService {
     ip?: string,
     ua?: string,
   ): Promise<TokenBundle> {
-    if (this.REUSE && (ip || ua)) {
-      const ipH = ip ? this.sha256(ip, this.ipSalt) : null;
-      const uaH = ua ? this.sha256(ua, this.uaSalt) : null;
+    const reuse = this.cfg.reuse;
+    const ipSalt = this.cfg.ipSalt;
+    const uaSalt = this.cfg.uaSalt;
+    const maxSessions = this.cfg.maxSessions;
+
+    if (reuse && (ip || ua)) {
+      const ipH = ip ? this.sha256(ip, ipSalt) : null;
+      const uaH = ua ? this.sha256(ua, uaSalt) : null;
       const existing = await this.prisma.refreshSession.findFirst({
         where: {
           userId,
@@ -188,7 +220,19 @@ export class AuthService {
       });
 
       if (existing) {
-        return this.rotateRefreshToken(existing.id, existing, ip, ua);
+        const access = await this.signAccess(
+          userId,
+          existing.id,
+          existing.familyId,
+        );
+
+        const refresh = `${existing.id}.${this.genOpaque()}`; // nie rotuj w tym momencie
+        return {
+          access,
+          refresh,
+          accessTtlSec: this.cfg.accessTtl,
+          refreshTtlSec: this.cfg.refreshTtl,
+        };
       }
     }
 
@@ -196,7 +240,7 @@ export class AuthService {
       where: { userId, revokedAt: null },
     });
 
-    if (activeCount >= this.MAX_SESSIONS) {
+    if (activeCount >= maxSessions) {
       const oldest = await this.prisma.refreshSession.findFirst({
         where: { userId, revokedAt: null },
         orderBy: { createdAt: 'asc' },
@@ -212,8 +256,6 @@ export class AuthService {
 
     const refreshPlain = this.genOpaque();
     const rtHash = await argon2.hash(refreshPlain, { type: argon2.argon2id });
-    const csrf = this.genCsrf();
-    const csrfHash = this.csrfHash(csrf);
 
     const familyId = randomUUID();
 
@@ -222,21 +264,21 @@ export class AuthService {
         userId,
         rtHash,
         familyId,
-        expiresAt: addSeconds(new Date(), this.cfg.REFRESH_TTL),
-        ipHash: ip ? this.sha256(ip, this.ipSalt) : null,
-        uaHash: ua ? this.sha256(ua, this.uaSalt) : null,
-        csrfHash,
+        expiresAt: addSeconds(new Date(), this.cfg.refreshTtl),
+        ipHash: ip ? this.sha256(ip, ipSalt) : null,
+        uaHash: ua ? this.sha256(ua, uaSalt) : null,
+        refreshCount: 0,
       },
     });
 
-    const access = await this.signAccess(userId, session.id);
+    const access = await this.signAccess(userId, session.id, session.familyId);
+    const refresh = `${session.id}.${refreshPlain}`;
 
     return {
       access,
-      refresh: `${session.id}.${refreshPlain}`,
-      csrf,
-      accessTtlSec: this.cfg.ACCESS_TTL,
-      refreshTtlSec: this.cfg.REFRESH_TTL,
+      refresh,
+      accessTtlSec: this.cfg.accessTtl,
+      refreshTtlSec: this.cfg.refreshTtl,
     };
   }
 
@@ -255,44 +297,50 @@ export class AuthService {
 
     const newPlain = this.genOpaque();
     const newHash = await argon2.hash(newPlain, { type: argon2.argon2id });
-    const csrf = this.genCsrf();
-    const csrfHash = this.csrfHash(csrf);
 
-    const newSession = await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT id FROM "RefreshSession" WHERE id = ${session.id} FOR UPDATE`;
-
+    // Tworzymy nową sesję najpierw, potem unieważniamy starą
+    const created = await this.prisma.$transaction(async (tx) => {
       const fresh = await tx.refreshSession.findUnique({
         where: { id: session.id },
       });
+
       if (!fresh || fresh.revokedAt)
         throw new ForbiddenException('Concurrent refresh');
 
-      await tx.refreshSession.update({
-        where: { id: session.id },
-        data: { revokedAt: new Date() },
-      });
-
-      return tx.refreshSession.create({
+      const newSession = await tx.refreshSession.create({
         data: {
           userId: session.userId,
           rtHash: newHash,
           familyId: session.familyId,
-          expiresAt: addSeconds(new Date(), this.cfg.REFRESH_TTL),
-          ipHash: session.ipHash ?? (ip ? this.sha256(ip, this.ipSalt) : null),
-          uaHash: session.uaHash ?? (ua ? this.sha256(ua, this.uaSalt) : null),
-          csrfHash,
+          expiresAt: addSeconds(new Date(), this.cfg.refreshTtl),
+          ipHash:
+            session.ipHash ?? (ip ? this.sha256(ip, this.cfg.ipSalt) : null),
+          uaHash:
+            session.uaHash ?? (ua ? this.sha256(ua, this.cfg.uaSalt) : null),
+          refreshCount: session.refreshCount + 1,
         },
       });
+
+      await tx.refreshSession.update({
+        where: { id: session.id },
+        data: { revokedAt: new Date(), lastUsedAt: new Date() },
+      });
+
+      return newSession;
     });
 
-    const access = await this.signAccess(session.userId, newSession.id);
+    const access = await this.signAccess(
+      session.userId,
+      created.id,
+      created.familyId,
+    );
+    const refresh = `${created.id}.${newPlain}`;
 
     return {
       access,
-      refresh: `${newSession.id}.${newPlain}`,
-      csrf,
-      accessTtlSec: this.cfg.ACCESS_TTL,
-      refreshTtlSec: this.cfg.REFRESH_TTL,
+      refresh,
+      accessTtlSec: this.cfg.accessTtl,
+      refreshTtlSec: this.cfg.refreshTtl,
     };
   }
 
@@ -301,8 +349,9 @@ export class AuthService {
       where: { id: sessionId, userId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+    await this.eventEmitter.emit('auth.session.revoked', { userId, sessionId });
     await this.logSecurity({
-      type: 'REVOKE',
+      type: SecurityEventType.REVOKE,
       userId,
     });
   }
@@ -312,8 +361,11 @@ export class AuthService {
       where: { userId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+
+    this.eventEmitter.emit('auth.session.revoked-all', { userId });
+
     await this.logSecurity({
-      type: 'REVOKE',
+      type: SecurityEventType.REVOKE,
       userId,
       details: { scope: 'all' },
     });
@@ -331,66 +383,144 @@ export class AuthService {
     await this.logSecurity({ type: event, userId, details: { familyId } });
   }
 
-  async refresh(
-    raw: string,
-    csrfToken: string,
-    ip?: string,
-    ua?: string,
-  ): Promise<TokenBundle> {
-    if (!raw || raw.length < 40 || raw.length > 500)
+  async refresh(raw: string, ip?: string, ua?: string): Promise<TokenBundle> {
+    if (!raw || raw.length < 10 || raw.length > 1000)
       throw new UnauthorizedException('Malformed token');
 
     const [sid, plain] = raw.split('.');
-    if (!sid || !plain) throw new UnauthorizedException('Malformed refresh');
+    if (!sid || !plain)
+      throw new UnauthorizedException('Malformed refresh token');
 
-    const session = await this.prisma.refreshSession.findUnique({
-      where: { id: sid },
+    // szukaj tylko aktywnej sesji
+    const session = await this.prisma.refreshSession.findFirst({
+      where: { id: sid, revokedAt: null },
     });
-    if (!session || session.revokedAt || session.expiresAt <= new Date())
-      throw new UnauthorizedException('Session invalid/expired');
 
-    if (!csrfToken || !session.csrfHash)
-      throw new ForbiddenException('CSRF required');
-    const a = Buffer.from(this.csrfHash(csrfToken));
-    const b = Buffer.from(session.csrfHash);
-    if (a.length !== b.length || !timingSafeEqual(a, b))
-      throw new ForbiddenException('Invalid CSRF token');
+    if (!session)
+      throw new UnauthorizedException('Session not found or revoked');
+
+    if (session.expiresAt <= new Date())
+      throw new UnauthorizedException('Session expired');
 
     const ok = await argon2.verify(session.rtHash, plain);
     if (!ok) {
       await this.revokeFamily(
         session.familyId,
         session.userId,
-        'REPLAY_DETECTED',
+        SecurityEventType.REPLAY_DETECTED,
       );
       throw new ForbiddenException('Replay detected');
     }
 
+    // fingerprint validation (opcjonalna)
     if (
       ip &&
       session.ipHash &&
-      session.ipHash !== this.sha256(ip, this.ipSalt)
+      session.ipHash !== this.sha256(ip, this.cfg.ipSalt)
     ) {
       await this.revokeFamily(
         session.familyId,
         session.userId,
-        'REPLAY_DETECTED',
+        SecurityEventType.REPLAY_DETECTED,
       );
       throw new ForbiddenException('Device mismatch (IP)');
     }
+
     if (
       ua &&
       session.uaHash &&
-      session.uaHash !== this.sha256(ua, this.uaSalt)
+      session.uaHash !== this.sha256(ua, this.cfg.uaSalt)
     ) {
       await this.revokeFamily(
         session.familyId,
         session.userId,
-        'REPLAY_DETECTED',
+        SecurityEventType.REPLAY_DETECTED,
       );
       throw new ForbiddenException('Device mismatch (UA)');
     }
 
     return this.rotateRefreshToken(session.id, session, ip, ua);
+  }
+
+  async listUserSessions(userId: string): Promise<SessionInfo[]> {
+    const sessions = await this.prisma.refreshSession.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        familyId: true,
+        createdAt: true,
+        lastUsedAt: true,
+        expiresAt: true,
+        revokedAt: true,
+        ipHash: true,
+        uaHash: true,
+      },
+    });
+    return sessions.map((s) => {
+      const parsed = parseUserAgent(s.uaHash ?? 'Unknown');
+
+      return {
+        id: s.id,
+        familyId: s.familyId,
+        createdAt: s.createdAt.toISOString(),
+        lastUsedAt: s.lastUsedAt ? s.lastUsedAt.toISOString() : null,
+        expiresAt: s.expiresAt.toISOString(),
+        ipHash: s.ipHash,
+        uaHash: s.uaHash,
+        active: !s.revokedAt && s.expiresAt > new Date(),
+        device: `${parsed.browser} / ${parsed.os}`,
+        lastUsedHuman: humanTime(s.lastUsedAt || s.createdAt),
+      };
+    });
+  }
+
+  async revokeFamilySessions(
+    userId: string,
+    familyId: string,
+  ): Promise<{ revoked: number }> {
+    const result = await this.prisma.refreshSession.updateMany({
+      where: { userId, familyId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    await this.logSecurity({
+      type: SecurityEventType.REVOKE,
+      userId,
+      details: { scope: 'family', familyId },
+    });
+    return { revoked: result.count };
+  }
+
+  async getSession(sessionId: string) {
+    return this.prisma.refreshSession.findUnique({ where: { id: sessionId } });
+  }
+
+  async validateAccessSession(
+    payload: AuthPayload,
+    meta: { ip?: string; ua?: string },
+  ): Promise<boolean> {
+    const session = await this.prisma.refreshSession.findUnique({
+      where: { id: payload.sessionId },
+    });
+
+    if (
+      !session ||
+      session.revokedAt ||
+      session.expiresAt.getTime() <= Date.now()
+    ) {
+      return false;
+    }
+
+    if (meta.ip && session.ipHash) {
+      const ipHash = this.sha256(meta.ip, this.cfg.ipSalt);
+      if (ipHash !== session.ipHash) return false;
+    }
+
+    if (meta.ua && session.uaHash) {
+      const uaHash = this.sha256(meta.ua, this.cfg.uaSalt);
+      if (uaHash !== session.uaHash) return false;
+    }
+
+    return true;
   }
 }

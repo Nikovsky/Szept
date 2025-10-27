@@ -1,24 +1,36 @@
+// apps/backend/src/modules/auth/auth.constroller.ts
 import {
   Body,
   Controller,
+  Get,
   Post,
   Req,
   Res,
   HttpCode,
   UseGuards,
+  Param,
 } from '@nestjs/common';
 import { Response, Request } from 'express';
 import { AuthService } from './auth.service';
 import { LoginUserDto, RegisterUserDto } from './dto/auth.dto';
 import { setAuthCookies, clearAuthCookies } from './utils/cookies.util';
 import { JwtAuthGuard } from './jwt/jwt.guard';
-import { CsrfGuard } from './utils/csrf.guard';
 import { Throttle } from '@nestjs/throttler';
-import { AuthRequest } from '@szept/types';
+import { AuthRequest, SessionInfo } from '@szept/types';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
+
+  private extractClientInfo(req: Request) {
+    const ipHeader = req.headers['x-forwarded-for'] as string | undefined;
+    const ip =
+      ipHeader?.split(',')[0].trim() ??
+      req.socket?.remoteAddress?.replace('::ffff:', '') ??
+      (req.ip ?? '').replace('::ffff:', '');
+    const ua = req.headers['user-agent'] ?? '';
+    return { ip, ua };
+  }
 
   // --- Rejestracja ---
   @Post('register')
@@ -29,13 +41,14 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { user, access, refresh, csrf, accessTtlSec, refreshTtlSec } =
-      await this.auth.register(dto, req.ip, req.get('user-agent'));
+    const { ip, ua } = this.extractClientInfo(req);
+
+    const { user, access, refresh, accessTtlSec, refreshTtlSec } =
+      await this.auth.register(dto, ip, ua);
 
     setAuthCookies(res, access, refresh, {
       secure: process.env.NODE_ENV === 'production',
       domain: process.env.COOKIE_DOMAIN,
-      csrf,
       accessTtlSec,
       refreshTtlSec,
     });
@@ -52,13 +65,14 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { access, refresh, csrf, accessTtlSec, refreshTtlSec } =
-      await this.auth.login(dto, req.ip, req.get('user-agent'));
+    const { ip, ua } = this.extractClientInfo(req);
+
+    const { access, refresh, accessTtlSec, refreshTtlSec } =
+      await this.auth.login(dto, ip, ua);
 
     setAuthCookies(res, access, refresh, {
       secure: process.env.NODE_ENV === 'production',
       domain: process.env.COOKIE_DOMAIN,
-      csrf,
       accessTtlSec,
       refreshTtlSec,
     });
@@ -69,26 +83,20 @@ export class AuthController {
   // --- Refresh ---
   @Post('refresh')
   @HttpCode(200)
-  @UseGuards(CsrfGuard)
+  @Throttle({ default: { ttl: 30, limit: 10 } })
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
+    const { ip, ua } = this.extractClientInfo(req);
     const raw = req.cookies?.refresh_token;
-    const csrf = req.get('x-csrf-token') || '';
 
-    const {
-      access,
-      refresh,
-      csrf: newCsrf,
-      accessTtlSec,
-      refreshTtlSec,
-    } = await this.auth.refresh(raw, csrf, req.ip, req.headers['user-agent']);
+    const { access, refresh, accessTtlSec, refreshTtlSec } =
+      await this.auth.refresh(raw, ip, ua);
 
     setAuthCookies(res, access, refresh, {
       secure: process.env.NODE_ENV === 'production',
       domain: process.env.COOKIE_DOMAIN,
-      csrf: newCsrf,
       accessTtlSec,
       refreshTtlSec,
     });
@@ -99,7 +107,7 @@ export class AuthController {
   // --- Wylogowanie ---
   @Post('logout')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, CsrfGuard)
+  @UseGuards(JwtAuthGuard)
   async logout(
     @Req() req: AuthRequest,
     @Res({ passthrough: true }) res: Response,
@@ -115,7 +123,7 @@ export class AuthController {
 
   @Post('logout-all')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, CsrfGuard)
+  @UseGuards(JwtAuthGuard)
   async logoutAll(
     @Req() req: AuthRequest,
     @Res({ passthrough: true }) res: Response,
@@ -128,5 +136,26 @@ export class AuthController {
     });
 
     return { ok: true };
+  }
+
+  // --- Lista sesji ---
+  @Get('sessions')
+  @UseGuards(JwtAuthGuard)
+  async listSessions(
+    @Req() req: AuthRequest,
+  ): Promise<{ sessions: SessionInfo[] }> {
+    const sessions = await this.auth.listUserSessions(req.user.userId);
+    return { sessions };
+  }
+
+  // --- UNIEWAŻNIANIE FAMILY ---
+  @Post('revoke-family/:familyId')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  async revokeFamily(
+    @Req() req: AuthRequest,
+    @Param('familyId') familyId: string,
+  ): Promise<{ revoked: number }> {
+    return this.auth.revokeFamilySessions(req.user.userId, familyId);
   }
 }

@@ -1,8 +1,12 @@
 // packages/types/index.ts
-export type {
+export {
   CookieOptions,
-  AccessPayload,
+  AuthPayload,
   SecurityEvent,
   TokenBundle,
   AuthRequest,
+  UserStatus,
+  SecurityEventType,
 } from "./auth.types";
+
+export { SessionInfo, DeviceInfo } from "./session.type";

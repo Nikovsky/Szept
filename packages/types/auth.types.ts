@@ -1,23 +1,41 @@
 // packages/types/auth.types.ts
 import { Request } from "express";
 
+export enum UserStatus {
+  ONLINE,
+  BUSY,
+  OFFLINE,
+}
+
+export enum SecurityEventType {
+  LOGIN,
+  REFRESH,
+  LOGOUT,
+  REVOKE,
+  REPLAY_DETECTED,
+  SOCKET_CONNECT,
+  SOCKET_DISCONNECT,
+  MESSAGE_SEND,
+}
+
 export interface CookieOptions {
   secure: boolean;
   domain?: string;
-  csrf?: string;
   accessTtlSec: number;
   refreshTtlSec?: number;
 }
 
-export interface AccessPayload {
+export interface AuthPayload {
   sub: string;
-  sid: string;
+  sessionId: string;
+  familyId: string;
+  role?: string[];
   iat?: number;
   exp?: number;
 }
 
 export interface SecurityEvent {
-  type: "LOGIN" | "LOGOUT" | "REFRESH" | "REVOKE" | "REPLAY_DETECTED";
+  type: SecurityEventType;
   userId: string;
   ip?: string;
   ua?: string;
@@ -28,11 +46,10 @@ export interface SecurityEvent {
 export interface TokenBundle {
   access: string;
   refresh: string;
-  csrf: string;
   accessTtlSec: number;
   refreshTtlSec: number;
 }
 
 export interface AuthRequest extends Request {
-  user: { userId: string; sessionId: string };
+  user: { userId: string; sessionId: string; roles?: string[] };
 }
